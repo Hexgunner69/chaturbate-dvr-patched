@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/teacat/chaturbate-dvr/config"
 	"github.com/teacat/chaturbate-dvr/entity"
@@ -119,6 +120,18 @@ func start(c *cli.Context) error {
 	server.Manager, err = manager.New()
 	if err != nil {
 		return fmt.Errorf("new manager: %w", err)
+	}
+
+	// Load persisted cookies/UA from disk if not provided via CLI flags
+	if server.Config.Cookies == "" {
+		if b, err := os.ReadFile("./conf/cookies.txt"); err == nil {
+			server.Config.Cookies = strings.TrimSpace(string(b))
+		}
+	}
+	if server.Config.UserAgent == "" {
+		if b, err := os.ReadFile("./conf/useragent.txt"); err == nil {
+			server.Config.UserAgent = strings.TrimSpace(string(b))
+		}
 	}
 
 	// init web interface if username is not provided

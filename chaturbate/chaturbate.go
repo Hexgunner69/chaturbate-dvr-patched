@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -17,55 +18,47 @@ import (
 	"github.com/teacat/chaturbate-dvr/server"
 )
 
-// roomDossierRegexp is used to extract the room dossier information from the HTML response.
 var roomDossierRegexp = regexp.MustCompile(`window\.initialRoomDossier = "(.*?)"`)
 
-// Client represents an API client for interacting with Chaturbate.
 type Client struct {
 	Req *internal.Req
 }
 
-// NewClient initializes and returns a new Client instance.
 func NewClient() *Client {
 	return &Client{
 		Req: internal.NewReq(),
 	}
 }
 
-// GetStream fetches the stream information for a given username.
 func (c *Client) GetStream(ctx context.Context, username string) (*Stream, error) {
 	return FetchStream(ctx, c.Req, username)
 }
 
-// FetchStream retrieves the streaming data from the given username's page.
 func FetchStream(ctx context.Context, client *internal.Req, username string) (*Stream, error) {
 	body, err := client.Get(ctx, fmt.Sprintf("%s%s", server.Config.Domain, username))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get page body: %w", err)
 	}
 
-	// Ensure that the playlist.m3u8 file is present in the response
-	if !strings.Contains(body, "playlist.m3u8") {
+	// Support both regular HLS (playlist.m3u8) and Low-Latency HLS (llhls.m3u8)
+	if !strings.Contains(body, "playlist.m3u8") && !strings.Contains(body, "llhls.m3u8") {
 		return nil, internal.ErrChannelOffline
 	}
 
 	return ParseStream(body)
 }
 
-// ParseStream extracts the HLS source URL from the given page body.
 func ParseStream(body string) (*Stream, error) {
 	matches := roomDossierRegexp.FindStringSubmatch(body)
 	if len(matches) == 0 {
 		return nil, errors.New("room dossier not found")
 	}
 
-	// Decode Unicode escape sequences in the extracted JSON string
 	sourceData, err := strconv.Unquote(strings.Replace(strconv.Quote(matches[1]), `\\u`, `\u`, -1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode unicode: %w", err)
 	}
 
-	// Unmarshal JSON to extract HLS source URL
 	var room struct {
 		HLSSource string `json:"hls_source"`
 	}
@@ -76,17 +69,14 @@ func ParseStream(body string) (*Stream, error) {
 	return &Stream{HLSSource: room.HLSSource}, nil
 }
 
-// Stream represents an HLS stream source.
 type Stream struct {
 	HLSSource string
 }
 
-// GetPlaylist retrieves the playlist corresponding to the given resolution and framerate.
 func (s *Stream) GetPlaylist(ctx context.Context, resolution, framerate int) (*Playlist, error) {
 	return FetchPlaylist(ctx, s.HLSSource, resolution, framerate)
 }
 
-// FetchPlaylist fetches and decodes the HLS playlist file.
 func FetchPlaylist(ctx context.Context, hlsSource string, resolution, framerate int) (*Playlist, error) {
 	if hlsSource == "" {
 		return nil, errors.New("HLS source is empty")
@@ -100,7 +90,6 @@ func FetchPlaylist(ctx context.Context, hlsSource string, resolution, framerate 
 	return ParsePlaylist(resp, hlsSource, resolution, framerate)
 }
 
-// ParsePlaylist decodes the M3U8 playlist and extracts the variant streams.
 func ParsePlaylist(resp, hlsSource string, resolution, framerate int) (*Playlist, error) {
 	p, _, err := m3u8.DecodeFrom(strings.NewReader(resp), true)
 	if err != nil {
@@ -117,23 +106,24 @@ func ParsePlaylist(resp, hlsSource string, resolution, framerate int) (*Playlist
 
 // Playlist represents an HLS playlist containing variant streams.
 type Playlist struct {
-	PlaylistURL string
-	RootURL     string
-	Resolution  int
-	Framerate   int
+	PlaylistURL     string
+	RootURL         string
+	Resolution      int
+	Framerate       int
+	InitSegmentData []byte // EXT-X-MAP moov box; written at the start of each new file
+	lastInitURI     string
 }
 
-// Resolution represents a video resolution and its corresponding framerate.
 type Resolution struct {
-	Framerate map[int]string // [framerate]url
+	Framerate map[int]string
 	Width     int
 }
 
-// PickPlaylist selects the best matching variant stream based on resolution and framerate.
+// PickPlaylist selects the best matching variant stream.
+// Uses net/url to correctly handle both relative and absolute-path variant URIs (LLHLS).
 func PickPlaylist(masterPlaylist *m3u8.MasterPlaylist, baseURL string, resolution, framerate int) (*Playlist, error) {
 	resolutions := map[int]*Resolution{}
 
-	// Extract available resolutions and framerates from the master playlist
 	for _, v := range masterPlaylist.Variants {
 		parts := strings.Split(v.Resolution, "x")
 		if len(parts) != 2 {
@@ -153,14 +143,11 @@ func PickPlaylist(masterPlaylist *m3u8.MasterPlaylist, baseURL string, resolutio
 		resolutions[width].Framerate[framerateVal] = v.URI
 	}
 
-	// Find exact match for requested resolution
 	variant, exists := resolutions[resolution]
 	if !exists {
-		// Filter resolutions below the requested resolution
 		candidates := lo.Filter(lo.Values(resolutions), func(r *Resolution, _ int) bool {
 			return r.Width < resolution
 		})
-		// Pick the highest resolution among the candidates
 		variant = lo.MaxBy(candidates, func(a, b *Resolution) bool {
 			return a.Width > b.Width
 		})
@@ -173,36 +160,64 @@ func PickPlaylist(masterPlaylist *m3u8.MasterPlaylist, baseURL string, resolutio
 		finalResolution = variant.Width
 		finalFramerate  = framerate
 	)
-	// Select the desired framerate, or fallback to the first available framerate
-	playlistURL, exists := variant.Framerate[framerate]
+	playlistURI, exists := variant.Framerate[framerate]
 	if !exists {
-		for fr, url := range variant.Framerate {
-			playlistURL = url
+		for fr, u := range variant.Framerate {
+			playlistURI = u
 			finalFramerate = fr
 			break
 		}
 	}
 
+	// Resolve variant URI against base URL — handles relative paths and absolute paths like /v1/edge/...
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse base URL: %w", err)
+	}
+	variantRef, err := url.Parse(playlistURI)
+	if err != nil {
+		return nil, fmt.Errorf("parse variant URL: %w", err)
+	}
+	resolvedURL := base.ResolveReference(variantRef).String()
+
+	// RootURL = directory containing the playlist (used to resolve relative segment URIs)
+	lastSlash := strings.LastIndex(resolvedURL, "/")
+	rootURL := resolvedURL[:lastSlash+1]
+
 	return &Playlist{
-		PlaylistURL: strings.TrimSuffix(baseURL, "playlist.m3u8") + playlistURL,
-		RootURL:     strings.TrimSuffix(baseURL, "playlist.m3u8"),
+		PlaylistURL: resolvedURL,
+		RootURL:     rootURL,
 		Resolution:  finalResolution,
 		Framerate:   finalFramerate,
 	}, nil
 }
 
-// WatchHandler is a function type that processes video segments.
 type WatchHandler func(b []byte, duration float64) error
 
 // WatchSegments continuously fetches and processes video segments.
+// For LLHLS streams: uses URI-based dedup and fetches the EXT-X-MAP init segment (moov box).
+// Init data is stored in p.InitSegmentData; HandleSegment writes it at the start of each file.
 func (p *Playlist) WatchSegments(ctx context.Context, handler WatchHandler) error {
 	var (
-		client  = internal.NewReq()
-		lastSeq = -1
+		client   = internal.NewReq()
+		lastSeq  = -1
+		seenURIs = make(map[string]bool)
 	)
 
+	base, err := url.Parse(p.PlaylistURL)
+	if err != nil {
+		return fmt.Errorf("parse playlist URL: %w", err)
+	}
+
+	resolveURL := func(uri string) string {
+		ref, err := url.Parse(uri)
+		if err != nil {
+			return uri
+		}
+		return base.ResolveReference(ref).String()
+	}
+
 	for {
-		// Fetch the latest playlist
 		resp, err := client.Get(ctx, p.PlaylistURL)
 		if err != nil {
 			return fmt.Errorf("get playlist: %w", err)
@@ -216,23 +231,42 @@ func (p *Playlist) WatchSegments(ctx context.Context, handler WatchHandler) erro
 			return fmt.Errorf("cast to media playlist")
 		}
 
-		// Process new segments
+		// Fetch playlist-level EXT-X-MAP init segment
+		if playlist.Map != nil && playlist.Map.URI != "" {
+			p.fetchInitSegment(ctx, client, base, playlist.Map.URI)
+		}
+
 		for _, v := range playlist.Segments {
 			if v == nil {
 				continue
 			}
+
+			// Fetch segment-level EXT-X-MAP (overrides playlist-level)
+			if v.Map != nil && v.Map.URI != "" {
+				p.fetchInitSegment(ctx, client, base, v.Map.URI)
+			}
+
+			// LLHLS URIs end in _llhls.ts so SegmentSeq returns -1; use URI dedup instead
 			seq := internal.SegmentSeq(v.URI)
-			if seq == -1 || seq <= lastSeq {
-				continue
+			if seq == -1 {
+				if seenURIs[v.URI] {
+					continue
+				}
+				seenURIs[v.URI] = true
+			} else {
+				if seq <= lastSeq {
+					continue
+				}
+				lastSeq = seq
 			}
-			lastSeq = seq
 
-			// Fetch segment data with retry mechanism
+			segURL := resolveURL(v.URI)
+
 			pipeline := func() ([]byte, error) {
-				return client.GetBytes(ctx, fmt.Sprintf("%s%s", p.RootURL, v.URI))
+				return client.GetBytes(ctx, segURL)
 			}
 
-			resp, err := retry.DoWithData(
+			segData, err := retry.DoWithData(
 				pipeline,
 				retry.Context(ctx),
 				retry.Attempts(3),
@@ -243,12 +277,35 @@ func (p *Playlist) WatchSegments(ctx context.Context, handler WatchHandler) erro
 				break
 			}
 
-			// Process the segment using the provided handler
-			if err := handler(resp, v.Duration); err != nil {
+			if err := handler(segData, v.Duration); err != nil {
 				return fmt.Errorf("handler: %w", err)
 			}
 		}
 
-		<-time.After(1 * time.Second) // time.Duration(playlist.TargetDuration)
+		<-time.After(1 * time.Second)
 	}
+}
+
+// fetchInitSegment downloads the EXT-X-MAP initialization segment and stores it.
+// Only re-fetches when the URI changes. Validates the response is real MP4 data, not an error page.
+func (p *Playlist) fetchInitSegment(ctx context.Context, client *internal.Req, base *url.URL, mapURI string) {
+	if mapURI == p.lastInitURI {
+		return
+	}
+	ref, err := url.Parse(mapURI)
+	if err != nil {
+		return
+	}
+	initURL := base.ResolveReference(ref).String()
+
+	data, err := client.GetBytes(ctx, initURL)
+	if err != nil {
+		return
+	}
+	// Must be a valid ISO BMFF box (ftyp or moov) — reject error pages
+	if len(data) < 8 || (string(data[4:8]) != "ftyp" && string(data[4:8]) != "moov") {
+		return
+	}
+	p.InitSegmentData = data
+	p.lastInitURI = mapURI
 }

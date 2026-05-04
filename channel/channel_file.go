@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"html/template"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
-// Pattern holds the date/time and sequence information for the filename pattern
 type Pattern struct {
 	Username string
 	Year     string
@@ -22,7 +23,6 @@ type Pattern struct {
 	Sequence int
 }
 
-// NextFile prepares the next file to be created, by cleaning up the last file and generating a new one
 func (ch *Channel) NextFile() error {
 	if err := ch.Cleanup(); err != nil {
 		return err
@@ -34,25 +34,23 @@ func (ch *Channel) NextFile() error {
 	if err := ch.CreateNewFile(filename); err != nil {
 		return err
 	}
-
-	// Increment the sequence number for the next file
 	ch.Sequence++
 	return nil
 }
 
-// Cleanup cleans the file and resets it, called when the stream errors out or before next file was created.
+// Cleanup closes the current file, deletes short clips, and remuxes .ts → .mp4.
 func (ch *Channel) Cleanup() error {
 	if ch.File == nil {
 		return nil
 	}
 	filename := ch.File.Name()
+	currentDuration := ch.Duration
 
 	defer func() {
 		ch.Filesize = 0
 		ch.Duration = 0
 	}()
 
-	// Sync the file to ensure data is written to disk
 	if err := ch.File.Sync(); err != nil && !errors.Is(err, os.ErrClosed) {
 		return fmt.Errorf("sync file: %w", err)
 	}
@@ -60,30 +58,37 @@ func (ch *Channel) Cleanup() error {
 		return fmt.Errorf("close file: %w", err)
 	}
 
-	// Delete the empty file
 	fileInfo, err := os.Stat(filename)
 	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("stat file delete zero file: %w", err)
+		return fmt.Errorf("stat file: %w", err)
 	}
-	if fileInfo != nil && fileInfo.Size() == 0 {
-		if err := os.Remove(filename); err != nil {
-			return fmt.Errorf("remove zero file: %w", err)
+
+	// Delete zero-byte files and short clips (CDN bootstrap artifacts under 30s)
+	const minDuration = 30.0
+	if fileInfo != nil && (fileInfo.Size() == 0 || currentDuration < minDuration) {
+		os.Remove(filename)
+		return nil
+	}
+
+	// Remux .ts container to .mp4 after recording completes
+	if strings.HasSuffix(filename, ".ts") {
+		mp4 := strings.TrimSuffix(filename, ".ts") + ".mp4"
+		cmd := exec.Command("ffmpeg", "-y", "-loglevel", "error", "-i", filename, "-c", "copy", mp4)
+		if err := cmd.Run(); err == nil {
+			os.Remove(filename)
 		}
 	}
 	return nil
 }
 
-// GenerateFilename creates a filename based on the configured pattern and the current timestamp
 func (ch *Channel) GenerateFilename() (string, error) {
 	var buf bytes.Buffer
 
-	// Parse the filename pattern defined in the channel's config
 	tpl, err := template.New("filename").Parse(ch.Config.Pattern)
 	if err != nil {
 		return "", fmt.Errorf("filename pattern error: %w", err)
 	}
 
-	// Get the current time based on the Unix timestamp when the stream was started
 	t := time.Unix(ch.StreamedAt, 0)
 	pattern := &Pattern{
 		Username: ch.Config.Username,
@@ -102,15 +107,11 @@ func (ch *Channel) GenerateFilename() (string, error) {
 	return buf.String(), nil
 }
 
-// CreateNewFile creates a new file for the channel using the given filename
 func (ch *Channel) CreateNewFile(filename string) error {
-
-	// Ensure the directory exists before creating the file
 	if err := os.MkdirAll(filepath.Dir(filename), 0777); err != nil {
 		return fmt.Errorf("mkdir all: %w", err)
 	}
 
-	// Open the file in append mode, create it if it doesn't exist
 	file, err := os.OpenFile(filename+".ts", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0777)
 	if err != nil {
 		return fmt.Errorf("cannot open file: %s: %w", filename, err)
@@ -120,7 +121,6 @@ func (ch *Channel) CreateNewFile(filename string) error {
 	return nil
 }
 
-// ShouldSwitchFile determines whether a new file should be created.
 func (ch *Channel) ShouldSwitchFile() bool {
 	maxFilesizeBytes := ch.Config.MaxFilesize * 1024 * 1024
 	maxDurationSeconds := ch.Config.MaxDuration * 60

@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/teacat/chaturbate-dvr/chaturbate"
 	"github.com/teacat/chaturbate-dvr/entity"
 	"github.com/teacat/chaturbate-dvr/internal"
 	"github.com/teacat/chaturbate-dvr/server"
@@ -26,8 +27,9 @@ type Channel struct {
 
 	Logs []string
 
-	File   *os.File
-	Config *entity.ChannelConfig
+	File     *os.File
+	Config   *entity.ChannelConfig
+	Playlist *chaturbate.Playlist
 }
 
 // New creates a new channel instance with the given manager and configuration.

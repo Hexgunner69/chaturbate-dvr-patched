@@ -3,6 +3,7 @@ package router
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -100,5 +101,8 @@ func UpdateConfig(c *gin.Context) {
 
 	server.Config.Cookies = req.Cookies
 	server.Config.UserAgent = req.UserAgent
+	os.MkdirAll("./conf", 0777)
+	os.WriteFile("./conf/cookies.txt", []byte(req.Cookies), 0666)
+	os.WriteFile("./conf/useragent.txt", []byte(req.UserAgent), 0666)
 	c.Redirect(http.StatusFound, "/")
 }

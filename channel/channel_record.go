@@ -102,6 +102,7 @@ func (ch *Channel) RecordStream(ctx context.Context, client *chaturbate.Client) 
 
 	ch.Info("stream quality - resolution %dp (target: %dp), framerate %dfps (target: %dfps)", playlist.Resolution, ch.Config.Resolution, playlist.Framerate, ch.Config.Framerate)
 
+	ch.Playlist = playlist
 	return playlist.WatchSegments(ctx, ch.HandleSegment)
 }
 
@@ -109,6 +110,16 @@ func (ch *Channel) RecordStream(ctx context.Context, client *chaturbate.Client) 
 func (ch *Channel) HandleSegment(b []byte, duration float64) error {
 	if ch.Config.IsPaused {
 		return retry.Unrecoverable(internal.ErrPaused)
+	}
+
+	// For fMP4/LLHLS streams: write moov init segment at the start of each new file.
+	// ch.Filesize == 0 whenever a new file has just been opened (Cleanup resets it).
+	if ch.Filesize == 0 && ch.Playlist != nil && len(ch.Playlist.InitSegmentData) > 0 {
+		n, err := ch.File.Write(ch.Playlist.InitSegmentData)
+		if err != nil {
+			return fmt.Errorf("write init segment: %w", err)
+		}
+		ch.Filesize += n
 	}
 
 	n, err := ch.File.Write(b)
