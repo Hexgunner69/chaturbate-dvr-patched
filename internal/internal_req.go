@@ -80,6 +80,11 @@ func (h *Req) GetBytes(ctx context.Context, url string) ([]byte, error) {
 		return nil, fmt.Errorf("forbidden: %w", ErrPrivateStream)
 	}
 
+	// Reject non-2xx responses so error pages don't get written into video files
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, url)
+	}
+
 	return b, err
 }
 

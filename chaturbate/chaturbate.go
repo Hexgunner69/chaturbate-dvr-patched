@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -204,6 +205,8 @@ func (p *Playlist) WatchSegments(ctx context.Context, handler WatchHandler) erro
 		seenURIs = make(map[string]bool)
 	)
 
+	log.Printf(" INFO [WatchSegments] playlist URL: %s", p.PlaylistURL)
+
 	base, err := url.Parse(p.PlaylistURL)
 	if err != nil {
 		return fmt.Errorf("parse playlist URL: %w", err)
@@ -261,6 +264,7 @@ func (p *Playlist) WatchSegments(ctx context.Context, handler WatchHandler) erro
 			}
 
 			segURL := resolveURL(v.URI)
+			log.Printf(" INFO [WatchSegments] fetching segment: %s", segURL)
 
 			pipeline := func() ([]byte, error) {
 				return client.GetBytes(ctx, segURL)
@@ -297,6 +301,7 @@ func (p *Playlist) fetchInitSegment(ctx context.Context, client *internal.Req, b
 		return
 	}
 	initURL := base.ResolveReference(ref).String()
+	log.Printf(" INFO [WatchSegments] fetching init segment: %s", initURL)
 
 	data, err := client.GetBytes(ctx, initURL)
 	if err != nil {
