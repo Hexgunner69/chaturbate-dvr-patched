@@ -27,9 +27,11 @@ type Channel struct {
 
 	Logs []string
 
-	File     *os.File
-	Config   *entity.ChannelConfig
-	Playlist *chaturbate.Playlist
+	File          *os.File
+	AudioFile     *os.File
+	AudioFilesize int
+	Config        *entity.ChannelConfig
+	Playlist      *chaturbate.Playlist
 }
 
 // New creates a new channel instance with the given manager and configuration.
