@@ -89,7 +89,29 @@ func ParsePlaylist(resp, hlsSource string, resolution, framerate int) (*Playlist
 	if !ok {
 		return nil, errors.New("invalid master playlist format")
 	}
-	return PickPlaylist(masterPlaylist, hlsSource, resolution, framerate)
+
+	// Parse EXT-X-MEDIA:TYPE=AUDIO URI directly from raw string —
+	// the grafov library does not reliably populate Variant.Alternatives.
+	audioURI := extractAudioURI(resp)
+
+	return PickPlaylist(masterPlaylist, hlsSource, audioURI, resolution, framerate)
+}
+
+// extractAudioURI scans a raw HLS master playlist for an EXT-X-MEDIA:TYPE=AUDIO URI.
+func extractAudioURI(playlist string) string {
+	for _, line := range strings.Split(playlist, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "#EXT-X-MEDIA:") || !strings.Contains(line, "TYPE=AUDIO") {
+			continue
+		}
+		if idx := strings.Index(line, `URI="`); idx >= 0 {
+			rest := line[idx+5:]
+			if end := strings.Index(rest, `"`); end >= 0 {
+				return rest[:end]
+			}
+		}
+	}
+	return ""
 }
 
 // Playlist represents an HLS playlist containing variant streams.
@@ -110,8 +132,8 @@ type Resolution struct {
 	Width     int
 }
 
-// PickPlaylist selects the best matching variant and its associated audio rendition.
-func PickPlaylist(masterPlaylist *m3u8.MasterPlaylist, baseURL string, resolution, framerate int) (*Playlist, error) {
+// PickPlaylist selects the best matching variant and resolves the audio rendition URL.
+func PickPlaylist(masterPlaylist *m3u8.MasterPlaylist, baseURL, audioURI string, resolution, framerate int) (*Playlist, error) {
 	resolutions := map[int]*Resolution{}
 
 	for _, v := range masterPlaylist.Variants {
@@ -171,24 +193,12 @@ func PickPlaylist(masterPlaylist *m3u8.MasterPlaylist, baseURL string, resolutio
 	lastSlash := strings.LastIndex(resolvedURL, "/")
 	rootURL := resolvedURL[:lastSlash+1]
 
-	// Find audio rendition (EXT-X-MEDIA:TYPE=AUDIO) from any variant's alternatives
+	// Resolve audio rendition URL
 	var audioPlaylistURL string
-	for _, v := range masterPlaylist.Variants {
-		if v == nil {
-			continue
-		}
-		for _, alt := range v.Alternatives {
-			if alt == nil || alt.Type != "AUDIO" || alt.URI == "" {
-				continue
-			}
-			audioRef, err := url.Parse(alt.URI)
-			if err == nil {
-				audioPlaylistURL = base.ResolveReference(audioRef).String()
-			}
-			break
-		}
-		if audioPlaylistURL != "" {
-			break
+	if audioURI != "" {
+		audioRef, err := url.Parse(audioURI)
+		if err == nil {
+			audioPlaylistURL = base.ResolveReference(audioRef).String()
 		}
 	}
 
