@@ -63,7 +63,7 @@ func main() {
 			&cli.StringFlag{
 				Name:  "pattern",
 				Usage: "Template for naming recorded videos",
-				Value: "videos/{{.Username}}_{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}-{{.Second}}{{if .Sequence}}_{{.Sequence}}{{end}}",
+				Value: "videos/{{.Username}}/{{.Username}}_{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}-{{.Second}}{{if .Sequence}}_{{.Sequence}}{{end}}",
 			},
 			&cli.IntFlag{
 				Name:  "max-duration",

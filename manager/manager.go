@@ -74,6 +74,10 @@ func (m *Manager) LoadConfig() error {
 	}
 
 	for i, conf := range config {
+		// Migrate flat pattern (videos/Username_...) to per-user subfolder (videos/Username/Username_...)
+		if strings.Contains(conf.Pattern, "videos/{{.Username}}_") {
+			conf.Pattern = strings.Replace(conf.Pattern, "videos/{{.Username}}_", "videos/{{.Username}}/{{.Username}}_", 1)
+		}
 		ch := channel.New(conf)
 		m.Channels.Store(conf.Username, ch)
 
